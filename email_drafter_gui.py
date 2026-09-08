@@ -1413,8 +1413,12 @@ class EmailDrafterGUI(QMainWindow):
 
     def handle_model_reply(self, reply):
         """Finish a request and ignore stale replies safely."""
-        raw_response = bytes(reply.readAll()).decode("utf-8", errors="replace")
         network_error = reply.error()
+        error_string = reply.errorString()
+        if network_error == QNetworkReply.NetworkError.OperationCanceledError:
+            raw_response = ""
+        else:
+            raw_response = bytes(reply.readAll()).decode("utf-8", errors="replace")
         reply.deleteLater()
 
         if reply is not self.active_reply:
@@ -1432,7 +1436,7 @@ class EmailDrafterGUI(QMainWindow):
             return
 
         if network_error != QNetworkReply.NetworkError.NoError:
-            message = self.extract_api_error(raw_response) or reply.errorString()
+            message = self.extract_api_error(raw_response) or error_string
             self.status_label.setText("Error")
             QMessageBox.critical(self, "Request failed", message)
             return

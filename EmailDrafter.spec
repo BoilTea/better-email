@@ -32,6 +32,49 @@ a = Analysis(
     noarchive=False,
     optimize=2,
 )
+
+# PyInstaller's PySide6 hook discovers every plugin that ships with Qt. Some of
+# those plugins pull in large optional frameworks (PDF, QML/Quick, virtual
+# keyboard, and OpenGL) that this widgets-only application never uses.
+_unused_qt_frameworks = (
+    'QtOpenGL.framework',
+    'QtPdf.framework',
+    'QtQml.framework',
+    'QtQmlMeta.framework',
+    'QtQmlModels.framework',
+    'QtQmlWorkerScript.framework',
+    'QtQuick.framework',
+    'QtVirtualKeyboard.framework',
+    'QtVirtualKeyboardQml.framework',
+)
+
+
+def _keep_qt_binary(entry):
+    destination = entry[0].replace('\\', '/')
+
+    if any(framework in destination for framework in _unused_qt_frameworks):
+        return False
+    if '/plugins/platforminputcontexts/' in destination:
+        return False
+    if '/plugins/generic/' in destination:
+        return False
+    if '/plugins/imageformats/' in destination:
+        return destination.endswith(('libqicns.dylib', 'libqico.dylib', 'libqsvg.dylib'))
+    if '/plugins/tls/' in destination:
+        return destination.endswith('libqsecuretransportbackend.dylib')
+    return True
+
+
+a.binaries = [entry for entry in a.binaries if _keep_qt_binary(entry)]
+a.datas = [
+    entry
+    for entry in a.datas
+    if not entry[0].replace('\\', '/').startswith('PySide6/Qt/translations/')
+    and not any(
+        framework in entry[0].replace('\\', '/')
+        for framework in _unused_qt_frameworks
+    )
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(
