@@ -1,13 +1,14 @@
 import os
 import sys
+import json
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QGridLayout, QLabel, QTextEdit, QLineEdit, QComboBox, QPushButton,
                                QScrollArea, QMessageBox, QGraphicsDropShadowEffect, QDialog,
                                QDialogButtonBox, QTabWidget, QCheckBox, QListView,
                                QStyledItemDelegate)
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer, QUrl, QByteArray
 from PySide6.QtGui import QFont, QColor
-from openai import OpenAI
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 import markdown
 import re
 
@@ -173,7 +174,7 @@ DEFAULT_USER_PROMPT = """Create a ready-to-send professional email from this bri
 - Content: {content}
 - Additional requirements or constraints: {additional_requirements}
 
-If Scenario is Auto-detect, classify it from the brief. Use the desired outcome to form one clear call to action. Return only the formatted draft required by the system prompt."""
+If Scenario is Auto-detect, classify it from the brief. If provided, use the desired outcome to form one clear call to action. Return only the formatted draft required by the system prompt."""
 
 PROMPT_PLACEHOLDERS = (
     "scenario",
@@ -226,7 +227,7 @@ MODEL_CONFIG = {
 }
 
 
-def call_large_model(
+def prepare_model_request(
     system_prompt,
     user_prompt,
     model,
@@ -246,28 +247,50 @@ def call_large_model(
     if not resolved_base_url or not resolved_model:
         raise ValueError("The custom API requires both a base URL and model ID.")
 
+    endpoint = resolved_base_url.rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+
+    payload = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 1000,
+        "temperature": 0.7,
+    }
+    payload.update(model_config.get("extra_body") or {})
+    return endpoint, payload
+
+
+def parse_model_response(raw_response, model_name):
+    """Extract final text from an OpenAI-compatible JSON response."""
     try:
-        client = OpenAI(
-            api_key=api_key or "not-required",
-            base_url=resolved_base_url,
-            timeout=60.0,
+        response = json.loads(raw_response)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The API returned an invalid JSON response.") from exc
+
+    if isinstance(response, dict) and response.get("error"):
+        error = response["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(message or "The API returned an unknown error.")
+
+    try:
+        content = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("The API response did not contain a message.") from exc
+
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict)
         )
-        response = client.chat.completions.create(
-            model=resolved_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=1000,
-            temperature=0.7,
-            extra_body=model_config.get("extra_body") or {},
-        )
-        content = (response.choices[0].message.content or "").strip()
-        if not content:
-            raise RuntimeError(f"{resolved_model} returned no final content.")
-        return content
-    except Exception as e:
-        raise RuntimeError(f"Failed to call {resolved_model}: {str(e)}") from e
+    content = str(content or "").strip()
+    if not content:
+        raise RuntimeError(f"{model_name} returned no final content.")
+    return content
 
 def render_user_prompt(template, **values):
     """Render a saved user prompt template with validated placeholders."""
@@ -287,7 +310,7 @@ def load_prompt_setting(settings, key, default, legacy_default):
     return saved
 
 
-def draft_email(
+def build_email_prompt(
     content,
     tone="neutral",
     sender="Sender",
@@ -296,15 +319,10 @@ def draft_email(
     additional_requirements="",
     scenario="Auto-detect",
     outcome="",
-    model=DEFAULT_MODEL,
-    api_key="",
-    system_prompt=DEFAULT_SYSTEM_PROMPT,
     user_prompt_template=DEFAULT_USER_PROMPT,
-    base_url=None,
-    request_model=None,
 ):
     """
-    Drafts an email with the selected model and its configured API provider.
+    Build the user message sent to the selected model.
     Only content is mandatory; other fields have default values.
 
     Parameters:
@@ -317,8 +335,7 @@ def draft_email(
     - relationship: str (e.g., 'colleague', 'friend', default: 'professional')
     - additional_requirements: str (extra instructions, default: '')
 
-    Returns:
-    - str: The drafted email
+    Returns the rendered user prompt.
     """
     if not content:
         raise ValueError("Please enter the content you want to draft an email for.")
@@ -335,15 +352,7 @@ def draft_email(
         additional_requirements=additional_requirements or "None",
     )
 
-    response = call_large_model(
-        system_prompt,
-        user_prompt,
-        model,
-        api_key,
-        base_url=base_url,
-        request_model=request_model,
-    )
-    return response
+    return user_prompt
 
 
 class SettingsDialog(QDialog):
@@ -674,6 +683,10 @@ class EmailDrafterGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+        self.network_manager = QNetworkAccessManager(self)
+        self.active_reply = None
+        self.request_was_cancelled = False
+        self.active_model_name = ""
         self.setWindowTitle("AI Email Drafter")
         self.setGeometry(70, 60, 1240, 840)
         self.setMinimumSize(1000, 720)
@@ -1003,7 +1016,7 @@ class EmailDrafterGUI(QMainWindow):
         # Submit button
         self.submit_button = QPushButton("Generate email")
         self.submit_button.setFont(self.button_font)
-        self.submit_button.clicked.connect(self.generate_email)
+        self.submit_button.clicked.connect(self.handle_submit_action)
         self.submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.submit_button.setMinimumHeight(45)
         self.submit_button.setStyleSheet("""
@@ -1025,6 +1038,12 @@ class EmailDrafterGUI(QMainWindow):
             QPushButton:disabled {
                 background-color: #b9b2df;
                 color: #f7f6ff;
+            }
+            QPushButton[cancelMode="true"] {
+                background-color: #d75c68;
+            }
+            QPushButton[cancelMode="true"]:hover {
+                background-color: #c94b58;
             }
         """)
         input_layout.addWidget(self.submit_button)
@@ -1252,8 +1271,14 @@ class EmailDrafterGUI(QMainWindow):
         QApplication.clipboard().setText(f"Subject: {subject}\n\n{body}".strip())
         self.status_label.setText("Copied")
 
+    def handle_submit_action(self):
+        if self.active_reply is not None:
+            self.cancel_generation()
+            return
+        self.generate_email()
+
     def generate_email(self):
-        """Handles the email drafting process and updates the output text area."""
+        """Start an asynchronous, cancellable email-generation request."""
         content = self.content_text.toPlainText().strip()
         if not content:
             QMessageBox.warning(self, "Content required", "Please enter what the email should say.")
@@ -1326,14 +1351,8 @@ class EmailDrafterGUI(QMainWindow):
             LEGACY_DEFAULT_USER_PROMPT,
         )
 
-        self.submit_button.setEnabled(False)
-        self.submit_button.setText("Generating…")
-        self.status_label.setText("Writing…")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-
         try:
-            email_draft = draft_email(
+            user_prompt = build_email_prompt(
                 content=content,
                 tone=tone,
                 sender=sender,
@@ -1342,39 +1361,137 @@ class EmailDrafterGUI(QMainWindow):
                 additional_requirements=additional_requirements,
                 scenario=scenario,
                 outcome=outcome,
+                user_prompt_template=user_prompt_template,
+            )
+            endpoint, payload = prepare_model_request(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 model=selected_model,
                 api_key=api_key,
-                system_prompt=system_prompt,
-                user_prompt_template=user_prompt_template,
                 base_url=base_url,
                 request_model=request_model,
             )
-            match = re.match(
-                r"\s*\*\*Subject\*\*:\s*(.*?)\r?\n\s*\r?\n(.*)",
-                email_draft,
-                re.DOTALL,
-            )
-            if match:
-                subject = match.group(1).strip()
-                email_content = match.group(2).strip()
-            else:
-                subject = ""
-                email_content = email_draft
-
-            # Convert Markdown to HTML for rendering
-            subject_html = markdown.markdown(subject)
-            content_html = markdown.markdown(email_content)
-            self.subject_text.setHtml(subject_html)
-            self.content_output_text.setHtml(content_html)
-            self.copy_button.setEnabled(True)
-            self.status_label.setText("Complete")
         except Exception as e:
             self.status_label.setText("Error")
             QMessageBox.critical(self, "Error", f"{str(e)}\n")
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.submit_button.setEnabled(True)
-            self.submit_button.setText("Generate email")
+            return
+
+        request = QNetworkRequest(QUrl(endpoint))
+        request.setHeader(
+            QNetworkRequest.KnownHeaders.ContentTypeHeader,
+            "application/json",
+        )
+        request.setRawHeader(QByteArray(b"Accept"), QByteArray(b"application/json"))
+        if api_key:
+            request.setRawHeader(
+                QByteArray(b"Authorization"),
+                QByteArray(f"Bearer {api_key}".encode("utf-8")),
+            )
+        request.setTransferTimeout(60_000)
+
+        self.request_was_cancelled = False
+        self.active_model_name = request_model or selected_model
+        reply = self.network_manager.post(
+            request,
+            QByteArray(json.dumps(payload).encode("utf-8")),
+        )
+        self.active_reply = reply
+        reply.finished.connect(
+            lambda current_reply=reply: self.handle_model_reply(current_reply)
+        )
+        self.set_generation_active(True)
+
+    def cancel_generation(self):
+        """Abort the active network reply without blocking the interface."""
+        if self.active_reply is None:
+            return
+        self.request_was_cancelled = True
+        self.submit_button.setEnabled(False)
+        self.submit_button.setText("Cancelling…")
+        self.status_label.setText("Cancelling…")
+        self.active_reply.abort()
+
+    def handle_model_reply(self, reply):
+        """Finish a request and ignore stale replies safely."""
+        raw_response = bytes(reply.readAll()).decode("utf-8", errors="replace")
+        network_error = reply.error()
+        reply.deleteLater()
+
+        if reply is not self.active_reply:
+            return
+
+        was_cancelled = (
+            self.request_was_cancelled
+            or network_error == QNetworkReply.NetworkError.OperationCanceledError
+        )
+        self.active_reply = None
+        self.set_generation_active(False)
+
+        if was_cancelled:
+            self.status_label.setText("Cancelled")
+            return
+
+        if network_error != QNetworkReply.NetworkError.NoError:
+            message = self.extract_api_error(raw_response) or reply.errorString()
+            self.status_label.setText("Error")
+            QMessageBox.critical(self, "Request failed", message)
+            return
+
+        try:
+            email_draft = parse_model_response(
+                raw_response,
+                self.active_model_name,
+            )
+            self.display_email_draft(email_draft)
+            self.status_label.setText("Complete")
+        except Exception as exc:
+            self.status_label.setText("Error")
+            QMessageBox.critical(self, "Invalid response", str(exc))
+
+    @staticmethod
+    def extract_api_error(raw_response):
+        try:
+            response = json.loads(raw_response)
+            error = response.get("error")
+            if isinstance(error, dict):
+                return error.get("message", "")
+            return str(error or "")
+        except (TypeError, json.JSONDecodeError):
+            return ""
+
+    def display_email_draft(self, email_draft):
+        match = re.match(
+            r"\s*\*\*Subject\*\*:\s*(.*?)\r?\n\s*\r?\n(.*)",
+            email_draft,
+            re.DOTALL,
+        )
+        if match:
+            subject = match.group(1).strip()
+            email_content = match.group(2).strip()
+        else:
+            subject = ""
+            email_content = email_draft
+
+        self.subject_text.setHtml(markdown.markdown(subject))
+        self.content_output_text.setHtml(markdown.markdown(email_content))
+        self.copy_button.setEnabled(True)
+
+    def set_generation_active(self, active):
+        self.submit_button.setProperty("cancelMode", active)
+        self.submit_button.style().unpolish(self.submit_button)
+        self.submit_button.style().polish(self.submit_button)
+        self.submit_button.setEnabled(True)
+        self.submit_button.setText(
+            "Cancel generation" if active else "Generate email"
+        )
+        if active:
+            self.status_label.setText("Writing…")
+
+    def closeEvent(self, event):
+        if self.active_reply is not None:
+            self.request_was_cancelled = True
+            self.active_reply.abort()
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

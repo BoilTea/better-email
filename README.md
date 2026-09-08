@@ -7,6 +7,7 @@ A modern desktop application that turns a short brief into a polished profession
 - Qwen 3.6 35B through SiliconFlow
 - DeepSeek V4 Flash through the official DeepSeek API
 - User-defined OpenAI-compatible endpoints
+- Responsive background requests with immediate cancellation
 - Skill-aware guidance for meetings, follow-ups, outreach, apologies, escalations, negotiations, and other business scenarios
 - Editable system and user prompts with live token estimates
 - API keys and preferences stored locally with `QSettings`
@@ -39,6 +40,8 @@ On first launch, the Settings window opens so you can configure an API provider.
 
 Custom providers must support the OpenAI Chat Completions interface. A local server can omit the API key if it does not require authentication.
 
+Requests use Qt's asynchronous network stack, so the interface remains responsive while a draft is generated. The Generate button becomes a Cancel button until the request finishes.
+
 ## Prompt customization
 
 The default prompts implement the strategy summarized from [SKILL.md](SKILL.md), including scenario diagnosis, relationship-aware tone, clear calls to action, concise structure, and a final quality checklist. Both prompts can be edited or restored from Settings.
@@ -63,4 +66,3 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 - Email content and prompts are sent only to the API provider selected in the app.
 - API keys are saved in the operating system's local `QSettings` storage and are never committed by this project.
 - `QSettings` is local storage, not an encrypted credential vault. Avoid using this app on an untrusted shared account.
-

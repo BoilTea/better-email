@@ -1,12 +1,11 @@
 import os
 import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
 
 import email_drafter_gui as app
 
@@ -51,45 +50,62 @@ class PromptTests(unittest.TestCase):
 
 class ModelRequestTests(unittest.TestCase):
     def test_qwen_request_uses_siliconflow_and_skill_fields(self):
-        captured = {}
-
-        class FakeCompletions:
-            def create(self, **kwargs):
-                captured.update(kwargs)
-                message = SimpleNamespace(
-                    content="**Subject**: Approval needed\n\nHi Alex,\n\nPlease approve this.\n\nBest,\nSam"
-                )
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=message)]
-                )
-
-        class FakeOpenAI:
-            def __init__(self, **kwargs):
-                captured["client"] = kwargs
-                self.chat = SimpleNamespace(
-                    completions=FakeCompletions()
-                )
-
-        with patch.object(app, "OpenAI", FakeOpenAI):
-            result = app.draft_email(
-                content="Ask Alex to approve the budget.",
-                scenario="Request / ask",
-                outcome="Approval by Friday",
-                sender="Sam",
-                receiver="Alex",
-                model=app.DEFAULT_MODEL,
-                api_key="test-key",
-            )
-
-        self.assertTrue(result.startswith("**Subject**:"))
-        self.assertEqual(
-            captured["client"]["base_url"],
-            "https://api.siliconflow.cn/v1",
+        user_prompt = app.build_email_prompt(
+            content="Ask Alex to approve the budget.",
+            scenario="Request / ask",
+            outcome="Approval by Friday",
+            sender="Sam",
+            receiver="Alex",
         )
-        self.assertEqual(captured["extra_body"], {"enable_thinking": False})
-        user_prompt = captured["messages"][1]["content"]
-        self.assertIn("Scenario: Request / ask", user_prompt)
-        self.assertIn("Desired outcome: Approval by Friday", user_prompt)
+        endpoint, payload = app.prepare_model_request(
+            system_prompt=app.DEFAULT_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            model=app.DEFAULT_MODEL,
+            api_key="test-key",
+        )
+
+        self.assertEqual(
+            endpoint,
+            "https://api.siliconflow.cn/v1/chat/completions",
+        )
+        self.assertEqual(payload["enable_thinking"], False)
+        sent_user_prompt = payload["messages"][1]["content"]
+        self.assertEqual(payload["model"], app.DEFAULT_MODEL)
+        self.assertIn("Scenario: Request / ask", sent_user_prompt)
+        self.assertIn("Desired outcome: Approval by Friday", sent_user_prompt)
+
+    def test_openai_compatible_response_is_parsed(self):
+        response = (
+            '{"choices":[{"message":{"content":'
+            '"**Subject**: Approval needed\\n\\nHi Alex"}}]}'
+        )
+        result = app.parse_model_response(response, "test-model")
+        self.assertTrue(result.startswith("**Subject**:"))
+
+
+class CancellationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def test_cancel_aborts_active_reply(self):
+        class FakeReply:
+            aborted = False
+
+            def abort(self):
+                self.aborted = True
+
+        window = app.EmailDrafterGUI()
+        reply = FakeReply()
+        window.active_reply = reply
+        window.cancel_generation()
+
+        self.assertTrue(reply.aborted)
+        self.assertTrue(window.request_was_cancelled)
+        self.assertEqual(window.status_label.text(), "Cancelling…")
+
+        window.active_reply = None
+        window.close()
 
 
 if __name__ == "__main__":
