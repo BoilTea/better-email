@@ -8,6 +8,7 @@ A modern desktop application that turns a short brief into a polished profession
 - DeepSeek V4 Flash through the official DeepSeek API
 - User-defined OpenAI-compatible endpoints
 - Responsive background requests with immediate cancellation
+- Optional previous-email or conversation context for natural replies and follow-ups
 - Skill-aware guidance for meetings, follow-ups, outreach, apologies, escalations, negotiations, and other business scenarios
 - Editable system and user prompts with live token estimates
 - API keys and preferences stored locally with `QSettings`

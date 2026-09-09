@@ -51,6 +51,21 @@ class PromptTests(unittest.TestCase):
             )
             self.assertEqual(custom, "My custom prompt")
 
+            settings.setValue(
+                app.USER_PROMPT_SETTING,
+                app.PREVIOUS_DEFAULT_USER_PROMPT,
+            )
+            upgraded_user_prompt = app.load_prompt_setting(
+                settings,
+                app.USER_PROMPT_SETTING,
+                app.DEFAULT_USER_PROMPT,
+                (
+                    app.LEGACY_DEFAULT_USER_PROMPT,
+                    app.PREVIOUS_DEFAULT_USER_PROMPT,
+                ),
+            )
+            self.assertEqual(upgraded_user_prompt, app.DEFAULT_USER_PROMPT)
+
 
 class ModelRequestTests(unittest.TestCase):
     def test_qwen_request_uses_siliconflow_and_skill_fields(self):
@@ -86,6 +101,25 @@ class ModelRequestTests(unittest.TestCase):
         result = app.parse_model_response(response, "test-model")
         self.assertTrue(result.startswith("**Subject**:"))
 
+    def test_previous_email_is_included_in_default_prompt(self):
+        prompt = app.build_email_prompt(
+            content="Confirm that Tuesday works.",
+            previous_email="Can we meet next Tuesday?",
+        )
+
+        self.assertIn("Previous email or thread", prompt)
+        self.assertIn("Can we meet next Tuesday?", prompt)
+
+    def test_previous_email_is_appended_to_an_older_custom_prompt(self):
+        prompt = app.build_email_prompt(
+            content="Confirm that Tuesday works.",
+            previous_email="Can we meet next Tuesday?",
+            user_prompt_template="Write this email: {content}",
+        )
+
+        self.assertTrue(prompt.startswith("Write this email:"))
+        self.assertIn("Can we meet next Tuesday?", prompt)
+
 
 class CancellationTests(unittest.TestCase):
     @classmethod
@@ -109,6 +143,85 @@ class CancellationTests(unittest.TestCase):
         self.assertEqual(window.status_label.text(), "Cancelling…")
 
         window.active_reply = None
+        window.close()
+
+
+class LayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def test_only_compose_panel_is_inside_the_scroll_area(self):
+        window = app.EmailDrafterGUI()
+
+        self.assertIs(window.centralWidget(), window.main_widget)
+        self.assertIs(window.left_scroll_area.widget(), window.input_widget)
+        self.assertTrue(window.left_scroll_area.isAncestorOf(window.input_widget))
+        self.assertFalse(window.left_scroll_area.isAncestorOf(window.output_widget))
+        self.assertEqual(
+            window.left_scroll_area.verticalScrollBarPolicy(),
+            app.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+
+        window.resize(1000, 720)
+        window.previous_email_toggle.setChecked(True)
+        window.show()
+        self.qt_app.processEvents()
+        scroll_bar = window.left_scroll_area.verticalScrollBar()
+        self.assertGreater(scroll_bar.maximum(), 0)
+        scroll_bar.setValue(scroll_bar.maximum())
+        self.assertEqual(scroll_bar.value(), scroll_bar.maximum())
+
+        window.close()
+
+    def test_multiline_editor_scrollbars_are_hidden_everywhere(self):
+        window = app.EmailDrafterGUI()
+        with tempfile.TemporaryDirectory() as directory:
+            settings = QSettings(
+                os.path.join(directory, "settings.ini"),
+                QSettings.Format.IniFormat,
+            )
+            settings_dialog = app.SettingsDialog(settings, window)
+            editors = window.findChildren(app.QTextEdit)
+            editors.extend(settings_dialog.findChildren(app.QTextEdit))
+
+            self.assertTrue(editors)
+            for editor in editors:
+                self.assertEqual(
+                    editor.horizontalScrollBarPolicy(),
+                    app.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+                )
+                self.assertEqual(
+                    editor.verticalScrollBarPolicy(),
+                    app.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+                )
+
+            settings_dialog.close()
+        window.close()
+
+    def test_settings_tabs_scroll_independently_at_compact_size(self):
+        window = app.EmailDrafterGUI()
+        with tempfile.TemporaryDirectory() as directory:
+            settings = QSettings(
+                os.path.join(directory, "settings.ini"),
+                QSettings.Format.IniFormat,
+            )
+            dialog = app.SettingsDialog(settings, window)
+            dialog.resize(640, 480)
+            dialog.show()
+
+            pages = (dialog.api_scroll_area, dialog.prompts_scroll_area)
+            self.assertIs(dialog.tabs.widget(0), pages[0])
+            self.assertIs(dialog.tabs.widget(1), pages[1])
+            for index, page in enumerate(pages):
+                dialog.tabs.setCurrentIndex(index)
+                self.qt_app.processEvents()
+                scroll_bar = page.verticalScrollBar()
+                self.assertGreater(scroll_bar.maximum(), 0)
+                scroll_bar.setValue(scroll_bar.maximum())
+                self.assertEqual(scroll_bar.value(), scroll_bar.maximum())
+
+            dialog.close()
         window.close()
 
 
@@ -167,6 +280,9 @@ class AsyncRequestTests(unittest.TestCase):
         custom_index = self.window.model_dropdown.findData(app.CUSTOM_MODEL)
         self.window.model_dropdown.setCurrentIndex(custom_index)
         self.window.content_text.setPlainText("Tell Alex the task is done.")
+        self.window.previous_email_text.setPlainText(
+            "Alex asked whether the task is complete."
+        )
 
     def tearDown(self):
         if self.window.active_reply is not None:
@@ -193,6 +309,7 @@ class AsyncRequestTests(unittest.TestCase):
         self.assertEqual(self.window.status_label.text(), "Complete")
         self.assertIn("Local test", self.window.subject_text.toPlainText())
         self.assertIn(b'"model": "local-test-model"', self.request_body)
+        self.assertIn(b"Alex asked whether the task is complete", self.request_body)
 
     def test_in_flight_request_can_be_cancelled(self):
         self.response_delay = 0.5

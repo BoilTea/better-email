@@ -4,7 +4,7 @@ This file provides guidance to Claude Code or Codex when working with code in th
 
 ## Project Overview
 
-This is a PySide6-based desktop application that drafts emails using AI language models. The application provides a GUI where users can input email parameters (content, scenario, desired outcome, tone, sender, receiver, relationship) and generate professionally formatted emails via external LLM APIs.
+This is a PySide6-based desktop application that drafts emails using AI language models. The application provides a GUI where users can input email parameters (content, optional previous-email context, scenario, desired outcome, tone, sender, receiver, relationship) and generate professionally formatted emails via external LLM APIs.
 
 ## Architecture
 
