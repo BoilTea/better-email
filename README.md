@@ -9,6 +9,9 @@ A modern desktop application that turns a short brief into a polished profession
 - User-defined OpenAI-compatible endpoints
 - Responsive background requests with immediate cancellation
 - Optional previous-email or conversation context for natural replies and follow-ups
+- Editable generated subject and body
+- One-click Shorter, Warmer, More formal, and Proofread refinements
+- Free-form change requests applied to the current edited draft
 - Skill-aware guidance for meetings, follow-ups, outreach, apologies, escalations, negotiations, and other business scenarios
 - Editable system and user prompts with live token estimates
 - API keys and preferences stored locally with `QSettings`
@@ -42,6 +45,8 @@ On first launch, the Settings window opens so you can configure an API provider.
 Custom providers must support the OpenAI Chat Completions interface. A local server can omit the API key if it does not require authentication.
 
 Requests use Qt's asynchronous network stack, so the interface remains responsive while a draft is generated. The Generate button becomes a Cancel button until the request finishes.
+
+Generated drafts can be edited directly. Refinements use the text currently visible in the subject and body editors, so manual changes are retained and become the starting point for the next revision.
 
 ## Prompt customization
 

@@ -13,11 +13,12 @@ This is a PySide6-based desktop application that drafts emails using AI language
 1. **API Integration Layer** (`prepare_model_request`, `build_email_prompt`, `parse_model_response`):
    - Supports SiliconFlow (Qwen), the official DeepSeek API, and one user-defined OpenAI-compatible endpoint
    - Uses `QNetworkAccessManager` for asynchronous, cancellable requests without blocking the GUI
+   - Uses the same request path for initial generation and revisions built by `build_refinement_prompt`
    - Model selection determines which OpenAI-compatible API endpoint and locally saved key to use
    - Returns markdown-formatted email drafts with subject and body
 
 2. **PySide6 GUI** (`EmailDrafterGUI` class):
-   - Split-pane layout: left side for inputs, right side for output
+   - Split-pane layout: left side for inputs, right side for editable output and refinement controls
    - Input fields: content (required), scenario, desired outcome, tone, sender, receiver, relationship, additional requirements, model selector
    - Default editable prompts implement the workflow in `SKILL.md`: situation diagnosis, scenario selection, CTA design, tone calibration, and quality review
    - Output displays: separate subject and content areas with HTML rendering

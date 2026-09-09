@@ -120,6 +120,18 @@ class ModelRequestTests(unittest.TestCase):
         self.assertTrue(prompt.startswith("Write this email:"))
         self.assertIn("Can we meet next Tuesday?", prompt)
 
+    def test_refinement_prompt_preserves_current_edited_draft(self):
+        prompt = app.build_refinement_prompt(
+            "Updated timeline",
+            "Hi Alex,\n\nThe launch is Tuesday.",
+            "Make this warmer",
+        )
+
+        self.assertIn("Make this warmer", prompt)
+        self.assertIn("**Subject**: Updated timeline", prompt)
+        self.assertIn("The launch is Tuesday", prompt)
+        self.assertIn("Preserve names, dates", prompt)
+
 
 class CancellationTests(unittest.TestCase):
     @classmethod
@@ -224,6 +236,25 @@ class LayoutTests(unittest.TestCase):
             dialog.close()
         window.close()
 
+    def test_draft_is_editable_and_refinement_controls_follow_its_state(self):
+        window = app.EmailDrafterGUI()
+
+        self.assertFalse(window.subject_text.isReadOnly())
+        self.assertFalse(window.content_output_text.isReadOnly())
+        self.assertEqual(
+            [button.text() for button in window.refinement_buttons],
+            [label for label, _instruction in app.REFINEMENT_ACTIONS],
+        )
+        self.assertFalse(window.apply_refinement_button.isEnabled())
+
+        window.content_output_text.setPlainText("An edited draft")
+        self.assertTrue(window.apply_refinement_button.isEnabled())
+        self.assertTrue(all(button.isEnabled() for button in window.refinement_buttons))
+
+        window.clear_output()
+        self.assertFalse(window.apply_refinement_button.isEnabled())
+        window.close()
+
 
 class AsyncRequestTests(unittest.TestCase):
     @classmethod
@@ -307,7 +338,7 @@ class AsyncRequestTests(unittest.TestCase):
         self.assertEqual(self.window.status_label.text(), "Writing…")
         self.assertTrue(self.wait_until(lambda: self.window.active_reply is None))
         self.assertEqual(self.window.status_label.text(), "Complete")
-        self.assertIn("Local test", self.window.subject_text.toPlainText())
+        self.assertIn("Local test", self.window.subject_text.text())
         self.assertIn(b'"model": "local-test-model"', self.request_body)
         self.assertIn(b"Alex asked whether the task is complete", self.request_body)
 
@@ -320,6 +351,38 @@ class AsyncRequestTests(unittest.TestCase):
         self.assertTrue(self.wait_until(lambda: self.window.active_reply is None))
         self.assertEqual(self.window.status_label.text(), "Cancelled")
         self.assertEqual(self.window.submit_button.text(), "Generate email")
+
+    def test_edited_draft_can_be_refined_asynchronously(self):
+        self.window.subject_text.setText("Edited subject")
+        self.window.content_output_text.setPlainText(
+            "Hi Alex,\n\nThis is my manually edited body."
+        )
+        instruction = app.REFINEMENT_ACTIONS[0][1]
+        self.window.refine_email(instruction)
+
+        self.assertIsNotNone(self.window.active_reply)
+        self.assertEqual(self.window.status_label.text(), "Refining…")
+        self.assertFalse(self.window.apply_refinement_button.isEnabled())
+        self.assertTrue(self.wait_until(lambda: self.window.active_reply is None))
+        self.assertEqual(self.window.status_label.text(), "Refined")
+        self.assertIn(b"Edited subject", self.request_body)
+        self.assertIn(b"manually edited body", self.request_body)
+        self.assertIn(b"substantially shorter", self.request_body)
+
+    def test_custom_change_request_uses_current_draft(self):
+        self.window.subject_text.setText("Budget review")
+        self.window.content_output_text.setPlainText("Please review the budget.")
+        self.window.custom_refinement_entry.setText(
+            "Add a polite request for a response by Thursday"
+        )
+        self.window.apply_custom_refinement()
+
+        self.assertEqual(self.window.status_label.text(), "Refining…")
+        self.assertTrue(self.wait_until(lambda: self.window.active_reply is None))
+        self.assertEqual(self.window.status_label.text(), "Refined")
+        self.assertIn(b"Budget review", self.request_body)
+        self.assertIn(b"response by Thursday", self.request_body)
+        self.assertEqual(self.window.custom_refinement_entry.text(), "")
 
 
 if __name__ == "__main__":

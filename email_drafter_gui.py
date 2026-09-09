@@ -248,6 +248,13 @@ EMAIL_SCENARIOS = (
     ("Reply to an angry email", "angry_reply"),
 )
 
+REFINEMENT_ACTIONS = (
+    ("Shorter", "Make the email substantially shorter and more concise while preserving every essential fact and request."),
+    ("Warmer", "Make the email warmer and more personable without becoming wordy, casual, or less clear."),
+    ("More formal", "Make the email more formal and polished while preserving its meaning and directness."),
+    ("Proofread", "Correct grammar, spelling, punctuation, clarity, and awkward phrasing without changing the intended meaning."),
+)
+
 MODEL_CONFIG = {
     "Qwen/Qwen3.6-35B-A3B": {
         "display_name": "Qwen 3.6 35B  ·  SiliconFlow",
@@ -413,6 +420,27 @@ def build_email_prompt(
         )
 
     return user_prompt
+
+
+def build_refinement_prompt(subject, body, instruction):
+    """Build a focused revision request from the user's current edited draft."""
+    subject = subject.strip()
+    body = body.strip()
+    instruction = instruction.strip()
+    if not subject and not body:
+        raise ValueError("Generate or enter a draft before refining it.")
+    if not instruction:
+        raise ValueError("Enter a change request first.")
+
+    return f"""Revise the current email using this instruction:
+{instruction}
+
+Preserve names, dates, commitments, links, numbers, and factual meaning unless the instruction explicitly asks you to change them. Return only one complete revised draft in the exact format required by the system prompt.
+
+Current draft:
+**Subject**: {subject or "Create an appropriate subject"}
+
+{body}"""
 
 
 class SettingsDialog(QDialog):
@@ -750,6 +778,7 @@ class EmailDrafterGUI(QMainWindow):
         self.active_reply = None
         self.request_was_cancelled = False
         self.active_model_name = ""
+        self.active_request_kind = "generate"
         self.setWindowTitle("AI Email Drafter")
         self.setGeometry(70, 60, 1240, 840)
         self.setMinimumSize(1000, 720)
@@ -793,7 +822,7 @@ class EmailDrafterGUI(QMainWindow):
                 padding: 10px;
                 color: #20283a;
                 font-size: 14px;
-                selection-background-color: #6d5bd0;
+                selection-background-color: #eeebff;
             }
             QTextEdit:focus, QLineEdit:focus {
                 border: 2px solid #6d5bd0;
@@ -935,6 +964,44 @@ class EmailDrafterGUI(QMainWindow):
         )
         input_layout.addWidget(subtitle_label)
 
+        # Previous email
+        self.previous_email_toggle = QPushButton(
+            "▸  Add previous email or thread (optional)"
+        )
+        self.previous_email_toggle.setCheckable(True)
+        self.previous_email_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.previous_email_toggle.setToolTip(
+            "Paste the message you received or earlier conversation context"
+        )
+        self.previous_email_toggle.setStyleSheet("""
+            QPushButton {
+                color: #5d50c6;
+                background-color: transparent;
+                border: none;
+                padding: 4px 2px;
+                text-align: left;
+                font-size: 13px;
+                font-weight: 600;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                color: #4d3aaf;
+                background-color: #f6f4ff;
+                border-radius: 7px;
+            }
+        """)
+        input_layout.addWidget(self.previous_email_toggle)
+
+        self.previous_email_text = QTextEdit()
+        self.previous_email_text.setFont(self.input_font)
+        self.previous_email_text.setPlaceholderText(
+            "Paste the email you are replying to, or relevant earlier messages…"
+        )
+        self.previous_email_text.setFixedHeight(96)
+        self.previous_email_text.setVisible(False)
+        self.previous_email_toggle.toggled.connect(self.toggle_previous_email)
+        input_layout.addWidget(self.previous_email_text)        
+
         # Content (required)
         brief_header = QHBoxLayout()
         brief_header.setSpacing(10)
@@ -978,43 +1045,6 @@ class EmailDrafterGUI(QMainWindow):
         self.content_text.setFixedHeight(110)
         clear_button.clicked.connect(self.content_text.clear)
         input_layout.addWidget(self.content_text)
-
-        self.previous_email_toggle = QPushButton(
-            "▸  Add previous email or thread (optional)"
-        )
-        self.previous_email_toggle.setCheckable(True)
-        self.previous_email_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.previous_email_toggle.setToolTip(
-            "Paste the message you received or earlier conversation context"
-        )
-        self.previous_email_toggle.setStyleSheet("""
-            QPushButton {
-                color: #5d50c6;
-                background-color: transparent;
-                border: none;
-                padding: 4px 2px;
-                text-align: left;
-                font-size: 13px;
-                font-weight: 600;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                color: #4d3aaf;
-                background-color: #f6f4ff;
-                border-radius: 7px;
-            }
-        """)
-        input_layout.addWidget(self.previous_email_toggle)
-
-        self.previous_email_text = QTextEdit()
-        self.previous_email_text.setFont(self.input_font)
-        self.previous_email_text.setPlaceholderText(
-            "Paste the email you are replying to, or relevant earlier messages…"
-        )
-        self.previous_email_text.setFixedHeight(96)
-        self.previous_email_text.setVisible(False)
-        self.previous_email_toggle.toggled.connect(self.toggle_previous_email)
-        input_layout.addWidget(self.previous_email_text)
 
         details_layout = QGridLayout()
         details_layout.setHorizontalSpacing(14)
@@ -1185,7 +1215,7 @@ class EmailDrafterGUI(QMainWindow):
         output_header.addWidget(self.status_label)
         output_layout.addLayout(output_header)
 
-        output_helper = QLabel("Review the result, then copy it when you are ready.")
+        output_helper = QLabel("Edit the result directly, refine it, then copy when ready.")
         output_helper.setStyleSheet(
             "color: #70798c; background-color: transparent; font-size: 13px; margin-bottom: 8px;"
         )
@@ -1196,13 +1226,12 @@ class EmailDrafterGUI(QMainWindow):
         subject_label.setFont(self.label_font)
         subject_label.setStyleSheet("color: #34495e; background-color: transparent; margin-top: 10px;")
         output_layout.addWidget(subject_label)
-        self.subject_text = QTextEdit()
+        self.subject_text = QLineEdit()
         self.subject_text.setFont(self.input_font)
-        self.subject_text.setReadOnly(True)
         self.subject_text.setPlaceholderText("Your subject line will appear here")
-        self.subject_text.setFixedHeight(62)
+        self.subject_text.setFixedHeight(52)
         self.subject_text.setStyleSheet("""
-            QTextEdit {
+            QLineEdit {
                 background-color: #fbfcfe;
                 border: 1px solid #dfe4ee;
                 border-radius: 10px;
@@ -1218,7 +1247,6 @@ class EmailDrafterGUI(QMainWindow):
         output_layout.addWidget(content_label)
         self.content_output_text = QTextEdit()
         self.content_output_text.setFont(self.input_font)
-        self.content_output_text.setReadOnly(True)
         self.content_output_text.setPlaceholderText("Your polished email will appear here")
         self.content_output_text.setStyleSheet("""
             QTextEdit {
@@ -1230,6 +1258,83 @@ class EmailDrafterGUI(QMainWindow):
             }
         """)
         output_layout.addWidget(self.content_output_text)
+
+        refinement_label = QLabel("Refine draft")
+        refinement_label.setFont(self.label_font)
+        refinement_label.setStyleSheet(
+            "color: #34495e; background-color: transparent; margin-top: 4px;"
+        )
+        output_layout.addWidget(refinement_label)
+
+        refinement_layout = QGridLayout()
+        refinement_layout.setHorizontalSpacing(6)
+        refinement_layout.setVerticalSpacing(6)
+        self.refinement_buttons = []
+        for column, (label, instruction) in enumerate(REFINEMENT_ACTIONS):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setEnabled(False)
+            button.setStyleSheet("""
+                QPushButton {
+                    color: #4d3aaf;
+                    background-color: #f3f1ff;
+                    border: 1px solid #ddd7ff;
+                    border-radius: 8px;
+                    padding: 7px 8px;
+                    min-height: 18px;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: #e9e5ff;
+                }
+                QPushButton:disabled {
+                    color: #aaa6c4;
+                    background-color: #f5f5f8;
+                    border-color: #e7e7ec;
+                }
+            """)
+            button.clicked.connect(
+                lambda _checked=False, request=instruction: self.refine_email(request)
+            )
+            refinement_layout.addWidget(button, 0, column)
+            self.refinement_buttons.append(button)
+        output_layout.addLayout(refinement_layout)
+
+        custom_refinement_layout = QHBoxLayout()
+        custom_refinement_layout.setSpacing(6)
+        self.custom_refinement_entry = QLineEdit()
+        self.custom_refinement_entry.setPlaceholderText(
+            "Custom change, e.g. make the ask clearer…"
+        )
+        self.custom_refinement_entry.setEnabled(False)
+        self.custom_refinement_entry.returnPressed.connect(
+            self.apply_custom_refinement
+        )
+        custom_refinement_layout.addWidget(self.custom_refinement_entry, 1)
+
+        self.apply_refinement_button = QPushButton("Apply")
+        self.apply_refinement_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_refinement_button.setEnabled(False)
+        self.apply_refinement_button.clicked.connect(self.apply_custom_refinement)
+        self.apply_refinement_button.setStyleSheet("""
+            QPushButton {
+                color: white;
+                background-color: #6d5bd0;
+                border-radius: 8px;
+                padding: 8px 12px;
+                min-height: 18px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #5c49c5; }
+            QPushButton:disabled {
+                color: #aaa6c4;
+                background-color: #ecebf3;
+            }
+        """)
+        custom_refinement_layout.addWidget(self.apply_refinement_button)
+        output_layout.addLayout(custom_refinement_layout)
 
         output_actions = QHBoxLayout()
         output_actions.addStretch()
@@ -1274,6 +1379,8 @@ class EmailDrafterGUI(QMainWindow):
         """)
         output_actions.addWidget(self.copy_button)
         output_layout.addLayout(output_actions)
+        self.subject_text.textChanged.connect(self.update_draft_actions)
+        self.content_output_text.textChanged.connect(self.update_draft_actions)
 
         self.left_scroll_area = QScrollArea()
         self.left_scroll_area.setWidgetResizable(True)
@@ -1367,10 +1474,97 @@ class EmailDrafterGUI(QMainWindow):
         )
         return has_provider_key or has_custom_api
 
+    def resolve_model_configuration(self):
+        """Return the selected provider settings, prompting once if incomplete."""
+        selected_model = self.model_dropdown.currentData()
+        model_config = MODEL_CONFIG[selected_model]
+
+        def read_configuration():
+            api_key = self.settings.value(
+                model_config["api_key_setting"], "", type=str
+            ).strip()
+            base_url = None
+            request_model = None
+            ready = bool(api_key)
+            if selected_model == CUSTOM_MODEL:
+                base_url = self.settings.value(
+                    CUSTOM_BASE_URL_SETTING, "", type=str
+                ).strip()
+                request_model = self.settings.value(
+                    CUSTOM_MODEL_SETTING, "", type=str
+                ).strip()
+                ready = bool(base_url and request_model)
+            return api_key, base_url, request_model, ready
+
+        api_key, base_url, request_model, ready = read_configuration()
+        if not ready:
+            self.open_settings()
+            api_key, base_url, request_model, ready = read_configuration()
+
+        if not ready:
+            requirement = (
+                "a model ID and base URL"
+                if selected_model == CUSTOM_MODEL
+                else "an API key"
+            )
+            QMessageBox.warning(
+                self,
+                "API configuration required",
+                f"Add {requirement} for {model_config['provider']} in Settings first.",
+            )
+            return None
+
+        return selected_model, api_key, base_url, request_model
+
+    def start_model_request(
+        self,
+        system_prompt,
+        user_prompt,
+        model_configuration,
+        request_kind="generate",
+    ):
+        """Start a shared cancellable request for generation or refinement."""
+        selected_model, api_key, base_url, request_model = model_configuration
+        endpoint, payload = prepare_model_request(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=selected_model,
+            api_key=api_key,
+            base_url=base_url,
+            request_model=request_model,
+        )
+
+        request = QNetworkRequest(QUrl(endpoint))
+        request.setHeader(
+            QNetworkRequest.KnownHeaders.ContentTypeHeader,
+            "application/json",
+        )
+        request.setRawHeader(QByteArray(b"Accept"), QByteArray(b"application/json"))
+        if api_key:
+            request.setRawHeader(
+                QByteArray(b"Authorization"),
+                QByteArray(f"Bearer {api_key}".encode("utf-8")),
+            )
+        request.setTransferTimeout(60_000)
+
+        self.request_was_cancelled = False
+        self.active_model_name = request_model or selected_model
+        self.active_request_kind = request_kind
+        reply = self.network_manager.post(
+            request,
+            QByteArray(json.dumps(payload).encode("utf-8")),
+        )
+        self.active_reply = reply
+        reply.finished.connect(
+            lambda current_reply=reply: self.handle_model_reply(current_reply)
+        )
+        self.set_generation_active(True)
+
     def clear_output(self):
         self.subject_text.clear()
         self.content_output_text.clear()
         self.copy_button.setEnabled(False)
+        self.set_refinement_controls_enabled(False)
         self.status_label.setText("Ready")
 
     def toggle_previous_email(self, expanded):
@@ -1385,12 +1579,69 @@ class EmailDrafterGUI(QMainWindow):
             self.previous_email_text.setFocus()
 
     def copy_email(self):
-        subject = self.subject_text.toPlainText().strip()
+        subject = self.subject_text.text().strip()
         body = self.content_output_text.toPlainText().strip()
         if not subject and not body:
             return
         QApplication.clipboard().setText(f"Subject: {subject}\n\n{body}".strip())
         self.status_label.setText("Copied")
+
+    def update_draft_actions(self):
+        """Enable copy and refinement whenever an editable draft is present."""
+        has_draft = bool(
+            self.subject_text.text().strip()
+            or self.content_output_text.toPlainText().strip()
+        )
+        self.copy_button.setEnabled(has_draft)
+        if self.active_reply is None:
+            self.set_refinement_controls_enabled(has_draft)
+
+    def set_refinement_controls_enabled(self, enabled):
+        for button in self.refinement_buttons:
+            button.setEnabled(enabled)
+        self.custom_refinement_entry.setEnabled(enabled)
+        self.apply_refinement_button.setEnabled(enabled)
+
+    def apply_custom_refinement(self):
+        instruction = self.custom_refinement_entry.text().strip()
+        if not instruction:
+            QMessageBox.warning(
+                self,
+                "Change request required",
+                "Describe how you want the current draft changed.",
+            )
+            return
+        self.refine_email(instruction)
+
+    def refine_email(self, instruction):
+        """Revise the user's current edited draft using the selected model."""
+        if self.active_reply is not None:
+            return
+
+        model_configuration = self.resolve_model_configuration()
+        if model_configuration is None:
+            return
+        system_prompt = load_prompt_setting(
+            self.settings,
+            SYSTEM_PROMPT_SETTING,
+            DEFAULT_SYSTEM_PROMPT,
+            LEGACY_DEFAULT_SYSTEM_PROMPT,
+        )
+        try:
+            user_prompt = build_refinement_prompt(
+                self.subject_text.text(),
+                self.content_output_text.toPlainText(),
+                instruction,
+            )
+            self.start_model_request(
+                system_prompt,
+                user_prompt,
+                model_configuration,
+                request_kind="refine",
+            )
+        except Exception as exc:
+            self.status_label.setText("Error")
+            QMessageBox.critical(self, "Refinement failed", str(exc))
 
     def handle_submit_action(self):
         if self.active_reply is not None:
@@ -1413,52 +1664,9 @@ class EmailDrafterGUI(QMainWindow):
         outcome = self.outcome_entry.text().strip()
         previous_email = self.previous_email_text.toPlainText().strip()
         additional_requirements = self.additional_requirements_entry.text().strip() or ""
-        selected_model = self.model_dropdown.currentData()
-        model_config = MODEL_CONFIG[selected_model]
-        api_key = self.settings.value(
-            model_config["api_key_setting"], "", type=str
-        ).strip()
-        base_url = None
-        request_model = None
-        configuration_ready = bool(api_key)
-
-        if selected_model == CUSTOM_MODEL:
-            base_url = self.settings.value(
-                CUSTOM_BASE_URL_SETTING, "", type=str
-            ).strip()
-            request_model = self.settings.value(
-                CUSTOM_MODEL_SETTING, "", type=str
-            ).strip()
-            configuration_ready = bool(base_url and request_model)
-
-        if not configuration_ready:
-            self.open_settings()
-            api_key = self.settings.value(
-                model_config["api_key_setting"], "", type=str
-            ).strip()
-            if selected_model == CUSTOM_MODEL:
-                base_url = self.settings.value(
-                    CUSTOM_BASE_URL_SETTING, "", type=str
-                ).strip()
-                request_model = self.settings.value(
-                    CUSTOM_MODEL_SETTING, "", type=str
-                ).strip()
-                configuration_ready = bool(base_url and request_model)
-            else:
-                configuration_ready = bool(api_key)
-
-            if not configuration_ready:
-                requirement = (
-                    "a model ID and base URL"
-                    if selected_model == CUSTOM_MODEL
-                    else "an API key"
-                )
-                QMessageBox.warning(
-                    self,
-                    "API configuration required",
-                    f"Add {requirement} for {model_config['provider']} in Settings first.",
-                )
-                return
+        model_configuration = self.resolve_model_configuration()
+        if model_configuration is None:
+            return
 
         system_prompt = load_prompt_setting(
             self.settings,
@@ -1486,43 +1694,16 @@ class EmailDrafterGUI(QMainWindow):
                 outcome=outcome,
                 user_prompt_template=user_prompt_template,
             )
-            endpoint, payload = prepare_model_request(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                model=selected_model,
-                api_key=api_key,
-                base_url=base_url,
-                request_model=request_model,
+            self.start_model_request(
+                system_prompt,
+                user_prompt,
+                model_configuration,
+                request_kind="generate",
             )
         except Exception as e:
             self.status_label.setText("Error")
             QMessageBox.critical(self, "Error", f"{str(e)}\n")
             return
-
-        request = QNetworkRequest(QUrl(endpoint))
-        request.setHeader(
-            QNetworkRequest.KnownHeaders.ContentTypeHeader,
-            "application/json",
-        )
-        request.setRawHeader(QByteArray(b"Accept"), QByteArray(b"application/json"))
-        if api_key:
-            request.setRawHeader(
-                QByteArray(b"Authorization"),
-                QByteArray(f"Bearer {api_key}".encode("utf-8")),
-            )
-        request.setTransferTimeout(60_000)
-
-        self.request_was_cancelled = False
-        self.active_model_name = request_model or selected_model
-        reply = self.network_manager.post(
-            request,
-            QByteArray(json.dumps(payload).encode("utf-8")),
-        )
-        self.active_reply = reply
-        reply.finished.connect(
-            lambda current_reply=reply: self.handle_model_reply(current_reply)
-        )
-        self.set_generation_active(True)
 
     def cancel_generation(self):
         """Abort the active network reply without blocking the interface."""
@@ -1551,6 +1732,7 @@ class EmailDrafterGUI(QMainWindow):
             self.request_was_cancelled
             or network_error == QNetworkReply.NetworkError.OperationCanceledError
         )
+        request_kind = self.active_request_kind
         self.active_reply = None
         self.set_generation_active(False)
 
@@ -1570,7 +1752,11 @@ class EmailDrafterGUI(QMainWindow):
                 self.active_model_name,
             )
             self.display_email_draft(email_draft)
-            self.status_label.setText("Complete")
+            if request_kind == "refine":
+                self.custom_refinement_entry.clear()
+                self.status_label.setText("Refined")
+            else:
+                self.status_label.setText("Complete")
         except Exception as exc:
             self.status_label.setText("Error")
             QMessageBox.critical(self, "Invalid response", str(exc))
@@ -1599,9 +1785,9 @@ class EmailDrafterGUI(QMainWindow):
             subject = ""
             email_content = email_draft
 
-        self.subject_text.setHtml(markdown.markdown(subject))
+        self.subject_text.setText(subject)
         self.content_output_text.setHtml(markdown.markdown(email_content))
-        self.copy_button.setEnabled(True)
+        self.update_draft_actions()
 
     def set_generation_active(self, active):
         self.submit_button.setProperty("cancelMode", active)
@@ -1609,10 +1795,15 @@ class EmailDrafterGUI(QMainWindow):
         self.submit_button.style().polish(self.submit_button)
         self.submit_button.setEnabled(True)
         self.submit_button.setText(
-            "Cancel generation" if active else "Generate email"
+            "Cancel request" if active else "Generate email"
         )
         if active:
-            self.status_label.setText("Writing…")
+            self.set_refinement_controls_enabled(False)
+            self.status_label.setText(
+                "Refining…" if self.active_request_kind == "refine" else "Writing…"
+            )
+        else:
+            self.update_draft_actions()
 
     def closeEvent(self, event):
         if self.active_reply is not None:
