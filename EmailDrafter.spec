@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['email_drafter_gui.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('dropdown_arrow.svg', '.')],
